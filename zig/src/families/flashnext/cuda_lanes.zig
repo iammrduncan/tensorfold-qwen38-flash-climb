@@ -15,6 +15,7 @@ const slide_mod = @import("cuda_slide.zig");
 const train = @import("cuda_train.zig");
 const bytes = @import("cuda_lanes_bytes.zig");
 const kvl = @import("cuda_kv_lanes.zig");
+const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 const be = lanes.backend;
 const ring = 1024;
 /// Streams a round takes at most (a round with more live streams takes them in turns).
@@ -177,6 +178,13 @@ pub fn Namespace(comptime Tri: type) type {
             /// --slide: the pocket's layout, from config.json at load.
             lay: living.Layout = undefined,
             kv: kvl.State = .{},
+            /// prompt_logprobs: the logprob kernel and a chunk's scores, made at the first stream that asks.
+            prompt_scores: ?prompt_logprobs.Rows = null,
+
+            fn promptScores(self: *Cuda) !*prompt_logprobs.Rows {
+                if (self.prompt_scores == null) self.prompt_scores = try prompt_logprobs.Rows.init(self.engine.driver);
+                return &self.prompt_scores.?;
+            }
 
             pub fn tri(self: *Cuda) Tri {
                 return .{ .set = if (self.set) |*x| x else null, .own = &self.glue, .s = self.stream };
@@ -222,9 +230,15 @@ pub fn Namespace(comptime Tri: type) type {
                     .probabilities = probabilitiesFn,
                     .score = @import("cuda_score.zig").Hook(Cuda, Tri).call,
                     .first_masked = firstMaskedFn,
+                    .prompt_rows = true,
                     .first_row = firstRowFn,
                 };
-                const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
+                // tensor ranks give no prompt rows: each rank's pass holds half the heads' scores
+                const ranked_table = comptime blk: {
+                    var t = @import("cuda_score.zig").withoutScore(scoring_table);
+                    t.prompt_rows = false;
+                    break :blk t;
+                };
                 return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
@@ -285,7 +299,8 @@ pub fn Namespace(comptime Tri: type) type {
                 if (s.logprobs != null and s.max_new > 1) return error.LogprobsAfterFirstToken;
                 const gop = try self.lanes.getOrPut(self.gpa, s);
                 if (gop.found_existing) dropLane(self, gop.value_ptr);
-                const drafting = self.head != null and s.drafts;
+                // a prompt_logprobs stream's chunks take every row's scores, which the head's prompt pass doesn't give
+                const drafting = self.head != null and s.drafts and s.prompt_logprobs == null;
                 // without the head's drafts, one row a stream a round: only a drafted window can rewind its states
                 if (!drafting) {
                     s.drafts = false;
@@ -321,6 +336,11 @@ pub fn Namespace(comptime Tri: type) type {
                 if (l.draft) |*d| d.media = if (l.seq.media) |*m| m.view() else null;
 
                 s.cached = 0;
+                // prompt_logprobs: every prompt row from the first, so nothing kept is restored
+                if (s.prompt_logprobs != null) {
+                    s.prompt_rows.clearRetainingCapacity();
+                    return l;
+                }
                 const saved = s.reuse.saved orelse return l;
                 const kept: *snap.Snap = @ptrCast(@alignCast(saved));
                 if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= ids.len) {
@@ -344,7 +364,8 @@ pub fn Namespace(comptime Tri: type) type {
                     s.keepInterruptedPrefill(@intCast(at));
                     return error.Cancelled;
                 }
-                const rows = @import("cuda_chunk.zig").passRows(&self.lanes, l, self.engine.chunk, self.engine.busy_chunk);
+                const pass_rows = @import("cuda_chunk.zig").passRows(&self.lanes, l, self.engine.chunk, self.engine.busy_chunk);
+                const rows = if (s.prompt_logprobs != null) @min(pass_rows, prompt_logprobs.max_rows) else pass_rows;
                 var stop = @min(ids.len, at + rows);
                 for (s.reuse.marks) |m| if (m > at and m < stop) {
                     stop = m;
@@ -352,7 +373,12 @@ pub fn Namespace(comptime Tri: type) type {
                 };
                 const last = stop == ids.len;
                 self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + rows));
-                if (l.draft) |*d| {
+                if (s.prompt_logprobs) |k| {
+                    if (self.ranks != null or l.draft != null) return error.PromptLogprobsUnsupported;
+                    const r = try self.promptScores();
+                    try self.engine.forward(Tri, self.tri(), &l.seq, ids[at..stop], .{ .logits = .all, .logits_out = r.logits.ptr, .prompt = true });
+                    try r.take(self.stream, self.gpa, s, ids, at, stop - at, k);
+                } else if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
                 } else if (self.ranks) |r| {
                     try r.forward(Tri, self.tri(), &l.seq, ids[at..stop], .{ .logits = if (last) .last else .none, .prompt = true });
@@ -391,6 +417,7 @@ pub fn Namespace(comptime Tri: type) type {
             own.parts.deinit(own.gpa);
             own.engine.round_graph.clear();
             own.logits.free();
+            if (own.prompt_scores) |*r| r.deinit();
             if (own.head) |h| h.deinit();
             if (own.vision) |v| v.deinit();
             if (own.ranks) |r| r.deinit();

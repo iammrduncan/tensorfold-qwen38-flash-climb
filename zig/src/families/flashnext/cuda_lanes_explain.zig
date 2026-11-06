@@ -17,6 +17,7 @@ pub fn open(err: anyerror) ?[]const u8 {
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
+        error.PromptLogprobsUnsupported => "prompt_logprobs on this engine run on one GPU, without drafts",
         error.LogprobsAfterFirstToken => "logprobs on this engine are the first token's alone: ask with max_tokens 1",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
