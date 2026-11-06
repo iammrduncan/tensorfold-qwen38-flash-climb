@@ -79,6 +79,15 @@ The 17 patches of MiaAI-Lab's recipe [Qwen3.8-Flash-Next-Single-DGX-Spark-Tensor
 - `zig/tests/cuda/nvfp4_experts_tile_tests.zig`
 - `zig/tests/cuda/w4a8_tests.zig`
 
+## The first token's logprobs on Flash Next's CUDA engine
+
+So the hill climb's judge can check what a change does to the model's output distribution, Flash Next's CUDA lanes give the first token's logprob row (OpenAI `logprobs`, with up to 20 best tokens and the rank): the prompt's last row of scores, the one the first token is drawn from, read in f64 on the host. A request with `logprobs` and more than one token is refused in words, since a window's rows are not read back. The files:
+
+- `MODIFICATIONS.md`
+- `zig/src/families/flashnext/cuda_lanes.zig`
+- `zig/src/families/flashnext/cuda_lanes_explain.zig`
+- `zig/src/families/flashnext/cuda_logprob_row.zig` (new)
+
 ## The hill climb's changes
 
 Each later commit is a change found by a hill climb run with [Thermite](https://github.com/iammrduncan/thermite) on DGX Sparks, confirmed by its judge, and states in its message what it changes and what it measured. Each is a patch on top of the recipe's, in its form: `git diff` from the commit before it.

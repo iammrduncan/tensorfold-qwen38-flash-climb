@@ -4,6 +4,7 @@
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
+        error.LogprobsAfterFirstToken => "logprobs on this engine are the first token's alone: ask with max_tokens 1",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
         error.TensorRankDraftSnapshotUnavailable => "tensor-rank MTP snapshots are unavailable: disable the prompt cache for this configuration",
