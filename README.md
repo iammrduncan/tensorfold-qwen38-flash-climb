@@ -1,3 +1,70 @@
+# Qwen3.8 Flash Next on one DGX Spark: a Thermite hill climb
+
+![Thermite × Mia AI Lab × TensorFold. A Thermite core runs the hill climb on three DGX Sparks: runners 1 and 2 run experiments with Qwen 3.8 Flash on TensorFold and Mia's single-Spark recipe, runner 3 judges every run. Goal 1: prefill speed. Goal 2: decode speed.](assets/mia-tensorfold-thermite.png)
+
+This repository is a fork of [TensorFold](https://github.com/ashhart/TensorFold) that brings [Mia AI Lab's recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold) for serving Qwen3.8 Flash Next on a single DGX Spark, the recipe TensorFold points to for this model, from TensorFold v1.1.4 to v1.2.3, TensorFold's newest release. [Thermite](https://github.com/iammrduncan/thermite) hill-climbs it. AI agents propose changes to the engine's source, and a judge the agents can't change builds, measures and keeps or refuses each one. It is a collaboration of Thermite, Mia AI Lab and TensorFold, and what it finds goes back to the recipe and to TensorFold.
+
+**Follow it live:** [live.usethermite.com/b534bceca269d914](https://live.usethermite.com/b534bceca269d914).
+
+## The goals
+
+Four runs, each starting from the one before's best:
+
+1. **Prefill speed:** prompt processing, in tokens per second, cold, at 8k, 32k and 64k tokens.
+2. **Load time:** from the server's start to its first answer, with the model read cold from the Spark's own NVMe drive into GPU memory.
+3. **Decode speed:** generation, in tokens per second, for one reply and for five at once.
+4. **The recipe's settings:** the engine's `TF_FLASHNEXT_*` settings, tuned for the engine as the first three runs leave it.
+
+All without changing what the model says.
+
+## The starting point
+
+The recipe is 17 patches to TensorFold v1.1.4. Only two of them apply to v1.2.3 as they are, so the climb starts from v1.2.3 with the three the recipe needs to serve its way, one commit each:
+
+- `0001` and `0002`: the export's quantized vision tower, and 16,384 tokens an image, as they are.
+- `0003`, `--kv-cache fp8`, carried over to v1.2.3, which rebuilt how Flash Next keeps a stream's caches. fp8 rows stay on each stream's own contiguous caches; with v1.2.3's paged KV (`TF_FLASHNEXT_KV_PAGES`) or its disk tier, fp8 is refused in words.
+- Logprobs on Flash Next's CUDA engine, for the judge's quality check: the first token's row (OpenAI `logprobs`) and every prompt row (vLLM's `prompt_logprobs`).
+
+It is served the recipe's way: its `TF_FLASHNEXT_*` settings, fp8 KV, vision, a 262,144-token window and five requests at once. The judge measured it at 1,603 tokens a second of prefill (1,612, 1,608 and 1,594 at 8k, 32k and 64k), 49.6 tokens a second of decode for one reply and 127 for five at once, with a load of 48 to 56 seconds and a run-to-run noise of 0.22%. The recipe on v1.1.4 measured 2,066, 66.3 and 178, and loaded in 190 seconds: the recipe's other patches are where that speed is.
+
+The other 14 patches, as written for v1.1.4, are in [`recipe/v1.1.4-patches/`](recipe/v1.1.4-patches/README.md). They are the climb's first experiments, one patch an experiment, each with three tries on different runners, so that one failed port doesn't lose it. v1.2.3 already holds parts of some of them in its own form.
+
+## How the climb runs
+
+- **One Thermite rig:** a core, which runs the hill climb, and three runners, each a DGX Spark. Runners 1 and 2 run the agents' experiments. Runner 3 is the judge's alone and measures every change.
+- **What agents change:** the engine's source (`zig/src/`, `zig/kernels/`) in the first three runs, and the recipe's `TF_FLASHNEXT_*` settings in the fourth. The serve flags, such as the context window, the number of requests at once and the KV cache's format, never change. The judge builds each change with the recipe's toolchain, serves it with the recipe's settings and times it with its own client.
+- **What wins:** prefill first; a tie on it goes to decode, then to five replies at once, then to the same two decodes sampled as the server serves by default, with a fixed seed. Decode may not fall more than 2% below the best so far.
+- **Quality:** every reply to the judge's fixed prompts, greedy, must be the starting point's, token for token, and a reply with drafts off must equal its drafted twin, the recipe's own rule. The model's next-token distribution is also checked at 43,006 positions of a long text: KL divergence, top-1 agreement and perplexity against the starting point. A change that alters any reply or moves that distribution at all is never kept on its own: it waits for a person's decision, with its numbers. Past limits set at about a quarter of what the recipe's fp8 KV cache itself costs against bf16, it is refused.
+- **Held back:** the judge's prompts and texts are not in this repository, so no change can be tuned to them.
+
+## Where the results go
+
+- **To Mia's recipe**, as a pull request that brings it forward to v1.2.3: the three patches above as carried over, each kept change as a new patch, with what the judge measured, and the fourth run's settings in its `scripts/config.sh`. Before it is opened, the recipe's own tools check the patches: its `prepare.sh` builds from them, its `tools/exact.py` checks the replies, and its benchmark measures them.
+- **To TensorFold**, as pull requests by its contribution process: the changes that help the engine beyond this recipe, such as the logprobs on Flash Next's CUDA engine and fp8 KV for Flash Next.
+- **Here:** each run's results.
+
+## Branches
+
+| Branch | What it holds |
+| --- | --- |
+| `recipe-v1.2.3` (default) | TensorFold v1.2.3, the recipe's patches `0001` to `0003` brought to it, the logprob hooks, the other 14 patches in `recipe/v1.1.4-patches/`, this README and the notices: the climb's starting point |
+| `qwen38-flash-climb` | TensorFold v1.1.4, then the recipe's 17 patches, one commit each, as its `prepare.sh` applies them: the recipe as published, measured as the first starting point |
+| `stock-v1.2.3` | TensorFold v1.2.3 as released, measured as the second |
+| `quality-hook`, `quality-hook-v1.2.3` | The first token's logprob row on Flash Next's CUDA engine, on each of those |
+| `main` | TensorFold's own |
+
+## Results
+
+The first run, prefill, is under way: [live.usethermite.com/b534bceca269d914](https://live.usethermite.com/b534bceca269d914). When the campaign ends, its results land here: each kept change with its measured gain, and the patches as they go to the recipe.
+
+## Licences
+
+TensorFold is under its own licences (`LICENSE`, `NOTICE`, `LICENSES/`). The recipe's patches are Mia AI Lab's, under the MIT License (`LICENSES/MiaAI-Lab-MIT.txt`, `NOTICE-recipe`). [MODIFICATIONS.md](MODIFICATIONS.md) lists every file this fork changes.
+
+---
+
+*TensorFold's own README follows.*
+
 # TensorFold
 
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
