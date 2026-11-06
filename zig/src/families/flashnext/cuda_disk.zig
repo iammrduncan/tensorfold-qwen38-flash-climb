@@ -101,6 +101,8 @@ pub fn Kept(comptime F: type) type {
         /// A fixed prompt's state at a mark inside its last chunk, hashed, and the prompt rate it took.
         pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, target: *anyopaque) !struct { hash: u64, rate: f64 } {
             const c = of(target);
+            // the image's rows are bf16 (snap.shape): --kv-cache fp8 states stay in device memory
+            if (c.engine.kv == .fp8) return error.Fp8KvDisk;
             var toks: [4096 + 40 + 7]u32 = undefined;
             for (&toks, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
             const Hook = struct {

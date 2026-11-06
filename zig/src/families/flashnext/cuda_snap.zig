@@ -8,24 +8,32 @@ const Draft = @import("cuda_mtp_draft.zig").Draft;
 const pages = @import("cuda_pages.zig");
 const sizes = @import("cuda_seq_bytes.zig");
 const Heads = @import("cuda_heads.zig").Heads;
+const Kv = @import("cuda_kv.zig").Kv;
 
 const index_row = wt.index_dim * 2;
 const tail_bytes = wt.ple_tail_n * wt.wide * 2;
 /// The MTP head's cache: its own layer, whole on every rank.
 const head_heads: Heads = .full;
 
-/// A state's shape for its disk image (cuda_disk.zig, one rank, the whole layer): layer counts and bytes a row.
+/// A state's shape for its disk image (cuda_disk.zig, one rank, the whole layer, bf16 rows): layer counts and bytes a row.
 pub const shape = .{ .linear = wt.linear_n, .attn = wt.attn_n, .conv = sizes.convBytes(.full), .state = sizes.stateBytes(.full), .kv_row = Heads.full.kvRow(), .index_row = index_row, .ratio = wt.index_ratio, .tail = tail_bytes };
 
-/// One attention cache's first `at` key, value and indexer-key rows at heads `h`, and the pooled blocks they complete.
-fn attnBytes(at: usize, h: Heads) usize {
-    return at * (2 * h.kvRow() + index_row) + at / wt.index_ratio * index_row;
+/// One attention cache's first `at` key, value and indexer-key rows at heads `h` in format `format`, and the pooled blocks
+/// they complete.
+fn attnBytes(format: Kv, at: usize, h: Heads) usize {
+    return at * (h.kv * (format.keyHead() + format.valueHead()) + index_row) + at / wt.index_ratio * index_row;
 }
 
 /// Device bytes a state at the model's heads `h` after `at` tokens takes: fixed DeltaNet pieces, attention by token.
 pub fn bytes(at: usize, head: bool, h: Heads) usize {
-    const own = wt.linear_n * (sizes.convBytes(h) + sizes.stateBytes(h)) + wt.attn_n * attnBytes(at, h) + tail_bytes;
-    return own + if (head) attnBytes(at, head_heads) else 0;
+    return bytesFor(.bf16, at, head, h);
+}
+
+/// bytes with the attention caches (and the head's) in format `format` (--kv-cache): an fp8 state takes 1,056 bytes of
+/// keys and values a layer and token where a bf16 one takes 2,048.
+pub fn bytesFor(format: Kv, at: usize, head: bool, h: Heads) usize {
+    const own = wt.linear_n * (sizes.convBytes(h) + sizes.stateBytes(h)) + wt.attn_n * attnBytes(format, at, h) + tail_bytes;
+    return own + if (head) attnBytes(format, at, head_heads) else 0;
 }
 
 /// One kept state; `head`: it holds the MTP head's cache over the same rows, which a drafting stream needs.
@@ -37,6 +45,8 @@ pub const Snap = struct {
     head: bool,
     /// The model's heads its pieces hold (the saved sequence's): a sequence of other heads cannot take it.
     heads: Heads = .full,
+    /// The format of the attention rows it holds (the engine's --kv-cache).
+    kv: Kv = .bf16,
 };
 
 const Way = enum { save, restore };
@@ -44,22 +54,32 @@ const Way = enum { save, restore };
 /// A piece `move` copies: `layers` buffers of `n` bytes, rows of `row` bytes (0: whole) a `per`-position block each.
 pub const Piece = struct { layers: usize, n: usize, row: usize = 0, per: usize = 1 };
 
+/// `move`'s pieces, the first `len` of them in order.
+pub const Order = struct { p: [11]Piece, len: usize };
+
 /// `move`'s pieces in order at `at` and the model's heads `h` (the disk image's at full): DeltaNet, attention, tail.
-pub fn order(at: usize, head: bool, h: Heads) struct { p: [11]Piece, len: usize } {
+pub fn order(at: usize, head: bool, h: Heads) Order {
+    return orderFor(.bf16, at, head, h);
+}
+
+/// order with the attention rows (and the head's) in format `format`.
+pub fn orderFor(format: Kv, at: usize, head: bool, h: Heads) Order {
     var o: [11]Piece = undefined;
     o[0] = .{ .layers = wt.linear_n, .n = sizes.convBytes(h) };
     o[1] = .{ .layers = wt.linear_n, .n = sizes.stateBytes(h) };
-    o[2..6].* = attnOrder(wt.attn_n, at, h);
+    o[2..6].* = attnOrder(format, wt.attn_n, at, h);
     o[6] = .{ .layers = 1, .n = tail_bytes };
-    if (head) o[7..11].* = attnOrder(1, at, head_heads);
+    if (head) o[7..11].* = attnOrder(format, 1, at, head_heads);
     return .{ .p = o, .len = if (head) 11 else 7 };
 }
 
 /// An attention cache's pieces for `at` rows: complete pooled blocks only (the rest pool again as later rows land).
-fn attnOrder(layers: usize, at: usize, h: Heads) [4]Piece {
+fn attnOrder(format: Kv, layers: usize, at: usize, h: Heads) [4]Piece {
+    const key_row = h.kv * format.keyHead();
+    const value_row = h.kv * format.valueHead();
     return .{
-        .{ .layers = layers, .n = at * h.kvRow(), .row = h.kvRow() },
-        .{ .layers = layers, .n = at * h.kvRow(), .row = h.kvRow() },
+        .{ .layers = layers, .n = at * key_row, .row = key_row },
+        .{ .layers = layers, .n = at * value_row, .row = value_row },
         .{ .layers = layers, .n = at * index_row, .row = index_row },
         .{ .layers = layers, .n = at / wt.index_ratio * index_row, .row = index_row, .per = wt.index_ratio },
     };
@@ -69,7 +89,8 @@ fn attnOrder(layers: usize, at: usize, h: Heads) [4]Piece {
 fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
     const dr = stream.d;
     var off: u64 = 0;
-    const o = order(at, d != null, seq.heads);
+    if (d) |h| if (h.kv != seq.kv) return error.KvFormat;
+    const o = orderFor(seq.kv, at, d != null, seq.heads);
     var bufs: [11][]cuda.DeviceBuffer = undefined;
     bufs[0..7].* = .{ seq.conv, seq.state, seq.kc, seq.vc, seq.ikc, seq.pooled, (&seq.tail)[0..1] };
     if (d) |h| bufs[7..11].* = .{ (&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1] };
@@ -103,16 +124,17 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
             off += p.n;
         }
     }
-    std.debug.assert(off == bytes(at, d != null, seq.heads));
+    std.debug.assert(off == bytesFor(seq.kv, at, d != null, seq.heads));
 }
 
 /// A copy of `seq` (and of the head's cache, with `d`) as it stands after `seq.fed` tokens.
 pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft) !*Snap {
     const at = seq.fed;
     if (d) |h| if (h.len != at or h.drafted != 0) return error.NotAtMark;
+    if (d) |h| if (h.kv != seq.kv) return error.KvFormat;
     const snap = try gpa.create(Snap);
     errdefer gpa.destroy(snap);
-    snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytes(at, d != null, seq.heads)), .at = at, .history = seq.history, .head = d != null, .heads = seq.heads };
+    snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytesFor(seq.kv, at, d != null, seq.heads)), .at = at, .history = seq.history, .head = d != null, .heads = seq.heads, .kv = seq.kv };
     errdefer snap.buf.free();
     errdefer cuda.completion.drain(driver, stream, "a failed snapshot save did not drain");
     try move(stream, seq, d, snap.buf.ptr, at, .save);
@@ -124,6 +146,7 @@ pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Str
 pub fn restore(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, snap: *const Snap) !void {
     if (snap.at > seq.cap) return error.SequenceTooShort;
     if (!snap.heads.eql(seq.heads)) return error.SnapShape;
+    if (snap.kv != seq.kv) return error.KvFormat;
     if (d) |h| if (!snap.head or snap.at > h.cap) return error.NoHeadState;
     // a state with the head's rows serves a stream without drafts too: those rows stay in the buffer
     try move(stream, seq, d, snap.buf.ptr, snap.at, .restore);
@@ -181,4 +204,32 @@ test "a state of the whole layer restores into no sequence of half the heads, an
 
 test {
     _ = @import("cuda_paging_snap_test.zig");
+}
+
+test "an fp8 state's bytes: the DeltaNet's and the n-gram tail as in bf16, then 1,056 + 256 bytes a layer and token" {
+    const per_layer = 1056 + 128 * 2;
+    try std.testing.expectEqual(@as(usize, 12 * per_layer), bytesFor(.fp8, 1, false, .full) - bytesFor(.fp8, 0, false, .full));
+    try std.testing.expectEqual(@as(usize, 12 * (4 * per_layer + 128 * 2)), bytesFor(.fp8, 4, false, .full) - bytesFor(.fp8, 0, false, .full));
+    try std.testing.expectEqual(@as(usize, 13 * per_layer), bytesFor(.fp8, 1, true, .full) - bytesFor(.fp8, 0, true, .full));
+    try std.testing.expectEqual(bytes(0, false, .full), bytesFor(.fp8, 0, false, .full));
+    for ([_]usize{ 1, 4, 513, 262144 }) |at| {
+        try std.testing.expectEqual(bytes(at, true, .full), bytesFor(.bf16, at, true, .full));
+        // a state at `at` tokens is smaller by (2,048 - 1,056) bytes a token of each of the 13 layers
+        try std.testing.expectEqual(at * 13 * (2048 - 1056), bytes(at, true, .full) - bytesFor(.fp8, at, true, .full));
+    }
+}
+
+test "a piece list moves exactly a state's bytes in either format, at either heads" {
+    for ([_]Kv{ .bf16, .fp8 }) |format| for ([_]Heads{ .full, .half }) |h| {
+        for ([_]usize{ 0, 3, 4, 1000 }) |at| {
+            var n: usize = 0;
+            for (attnOrder(format, 1, at, h)) |p| n += p.n;
+            try std.testing.expectEqual(attnBytes(format, at, h), n);
+            // and the whole order, the head's included, is the state's bytes
+            const o = orderFor(format, at, true, h);
+            var all: usize = 0;
+            for (o.p[0..o.len]) |p| all += p.layers * p.n;
+            try std.testing.expectEqual(bytesFor(format, at, true, h), all);
+        }
+    };
 }

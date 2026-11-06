@@ -4,6 +4,7 @@ const wt = @import("cuda_prompt_wt.zig");
 const gdn = @import("cuda_gdn.zig");
 const pages = @import("cuda_pages.zig");
 const Heads = @import("cuda_heads.zig").Heads;
+const Kv = @import("cuda_kv.zig").Kv;
 
 const linear_n = wt.linear_n;
 const attn_n = wt.attn_n;
@@ -25,6 +26,17 @@ pub fn kvBytes(cap: usize, h: Heads) usize {
     return cap * h.kvRow();
 }
 
+/// One attention layer's keys for `cap` positions in format `f` (--kv-cache, cuda_kv.zig): bf16 rows, or fp8 codes with
+/// each row's scales.
+pub fn keyBytesFor(f: Kv, cap: usize, h: Heads) usize {
+    return cap * h.kv * f.keyHead();
+}
+
+/// One attention layer's values for `cap` positions in format `f`.
+pub fn valueBytesFor(f: Kv, cap: usize, h: Heads) usize {
+    return cap * h.kv * f.valueHead();
+}
+
 /// One attention layer's indexer keys for `cap` positions: whole on every rank.
 pub fn indexBytes(cap: usize) usize {
     return cap * index_dim * 2;
@@ -37,13 +49,22 @@ pub fn pooledBytes(cap: usize) usize {
 
 /// Every attention layer's contiguous caches for `cap` positions: keys, values, indexer keys and pooled blocks.
 fn attnBytes(cap: usize, h: Heads) usize {
-    return attn_n * (2 * kvBytes(cap, h) + indexBytes(cap) + pooledBytes(cap));
+    return attnBytesFor(.bf16, cap, h);
+}
+
+fn attnBytesFor(f: Kv, cap: usize, h: Heads) usize {
+    return attn_n * (keyBytesFor(f, cap, h) + valueBytesFor(f, cap, h) + indexBytes(cap) + pooledBytes(cap));
 }
 
 /// Device bytes `Engine.newSeq(cap)` allocates: conv tails, recurrent states, KV with indexer keys, the n-gram tail.
 pub fn seqBytes(cap: usize, h: Heads) usize {
+    return seqBytesFor(.bf16, cap, h);
+}
+
+/// seqBytes with the attention caches in format `f`: fp8 keys and values take 1,056 bytes a position and layer, not 2,048.
+pub fn seqBytesFor(f: Kv, cap: usize, h: Heads) usize {
     const linear = linear_n * (convBytes(h) + stateBytes(h));
-    return linear + attnBytes(cap, h) + wt.ple_tail_n * wt.wide * 2;
+    return linear + attnBytesFor(f, cap, h) + wt.ple_tail_n * wt.wide * 2;
 }
 
 /// Contiguous storage or the page diagnostic's rounded arena and table, with every live allocation priced.
@@ -63,6 +84,18 @@ test "a sequence's device bytes grow by the twelve attention layers' keys, value
         try std.testing.expectEqual(per_token + attn_n * index_dim * 2, seqBytes(5, h) - seqBytes(4, h));
         try std.testing.expect(seqBytes(max_tokens, h) > max_tokens * per_token);
     }
+}
+
+test "fp8 caches take 1,056 + 256 bytes a position and layer, and the pooled blocks stay bf16" {
+    const fp8 = Kv.fp8;
+    const per_token = attn_n * (fp8.kvRow() + index_dim * 2);
+    try std.testing.expectEqual(per_token, seqBytesFor(.fp8, 6, .full) - seqBytesFor(.fp8, 5, .full));
+    try std.testing.expectEqual(per_token + attn_n * index_dim * 2, seqBytesFor(.fp8, 5, .full) - seqBytesFor(.fp8, 4, .full));
+    // the default format is the one seqBytes always had
+    for ([_]usize{ 0, 1, 4, 5, 4096, max_tokens }) |cap| try std.testing.expectEqual(seqBytes(cap, .full), seqBytesFor(.bf16, cap, .full));
+    // 12 layers of 1,376 bytes a token against 2,368 (the MTP head's layer is counted by its draft cache)
+    const d = seqBytesFor(.bf16, max_tokens, .full) - seqBytesFor(.fp8, max_tokens, .full);
+    try std.testing.expectEqual(max_tokens * attn_n * (2048 - 1056), d);
 }
 
 test "a stream at 65,536 tokens: 1.84 GiB with the whole layer, 1.04 GiB with a rank's half of the heads" {

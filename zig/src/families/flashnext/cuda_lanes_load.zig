@@ -30,6 +30,9 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
     if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null)) return error.FlashNextPagesUnsupported;
+    // --kv-cache fp8 (cuda_kv.zig) is written and read by our own glue on one rank, on each stream's own contiguous caches,
+    // and the learner's passes keep bf16
+    if (o.kv8 and (o.tp != 1 or captured != null or o.slide or page_tokens > 0 or try @import("cuda_pages.zig").pageTest() > 0)) return error.Fp8KvUnsupported;
     // pending DeltaNet rows run on one GPU only: TF_FLASHNEXT_KEEP_LATE=1 with tensor parallel is refused
     const Draft = @import("cuda_mtp_draft.zig").Draft;
     const late_fits = o.tp == 1;
@@ -63,6 +66,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         r.deinit();
     };
     own.engine = try prompt.Engine.initRank(gpa, io, driver, &own.stream, dir, o.tp, o.rank);
+    own.engine.kv = if (o.kv8) .fp8 else .bf16;
     if (own.ranks) |r| {
         r.engine = own.engine;
         own.engine.collective = &r.collective;
@@ -75,6 +79,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         if (own.set != null) return error.VisionCapturedSetUnsupported;
         own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media, own.glue.f.prep_media_paged, own.glue.f.pool_media_paged);
         own.engine.image_factory = own.vision;
+        if (o.kv8) own.vision.?.prep8 = own.glue.f.prep_media_kv8;
     }
     errdefer if (own.vision) |v| v.deinit();
     // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
@@ -97,11 +102,13 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     own.lanes = .empty;
     own.next = 0;
     if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
-    const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest(), own.engine.heads);
+    const kv = own.engine.kv;
+    // fp8 caches are each stream's own (pages are refused with them above); bf16 ones may be the page diagnostic's
+    const own_seq_bytes = if (kv == .fp8) prompt.seqBytesFor(kv, window, own.engine.heads) else try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest(), own.engine.heads);
     var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
-        stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk, own.engine.heads);
-    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk, own.engine.heads);
+        stream_bytes += mtp.Draft.bytesFor(kv, window, h.ids.len, own.engine.chunk, own.engine.heads);
+    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytesFor(kv, window, 1, own.engine.chunk, own.engine.heads);
     if (o.vision) |v| stream_bytes += @as(usize, v.image_tokens) * @import("cuda_prompt_wt.zig").dims * 2 + 16 * o.context;
     if (page_tokens > 0) {
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
@@ -142,4 +149,14 @@ pub fn comparison(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, ctx:
     set.deinit();
     std.log.info("flashnext: the captured set at {s} lacks Flash Next's kernels; its own glue runs", .{dir});
     return null;
+}
+
+/// The loader's device bytes for a stream on its own caches at a `window`-token cache and heads `h`: its sequence and, with
+/// the MTP head (`head_ids` its draft vocabulary, null without it), the head's cache and window buffers.
+pub fn streamBytes(kv: prompt.kv_format.Kv, window: usize, head_ids: ?usize, chunk: usize, tp_head: bool, h: @import("cuda_heads.zig").Heads) usize {
+    var n = prompt.seqBytesFor(kv, window, h);
+    if (head_ids) |ids| {
+        n += mtp.Draft.bytesFor(kv, window, ids, chunk, h);
+    } else if (tp_head) n += mtp.Draft.bytesFor(kv, window, 1, chunk, h);
+    return n;
 }

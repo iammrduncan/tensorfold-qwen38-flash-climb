@@ -8,6 +8,7 @@ pub fn open(err: anyerror) ?[]const u8 {
         error.FlashNextRanksOnCapturedGlue => "--tp 2 runs Flash Next's own glue, not a captured set: set TENSORFOLD_CUDA_KERNELS=native, or serve on one GPU",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
+        error.Fp8KvUnsupported, error.Fp8KvDisk => explain(err),
         else => null,
     };
 }
@@ -27,6 +28,9 @@ pub fn explain(err: anyerror) ?[]const u8 {
         else => @import("cuda_images.zig").Vision.explain(err),
         error.PocketOfAnotherSize => "a lesson's pocket is wider than the layer's loaded one: restart the server on the folder",
         error.UnsupportedLearningFormat => "--slide requires the affine 4-bit group-32 single-rank Flash Next checkpoint",
+        error.Fp8KvUnsupported => "--kv-cache fp8 runs on Flash Next's own glue on one rank, on each stream's own caches: serve it without --tp, --slide, TF_FLASHNEXT_KV_PAGES, TF_FLASHNEXT_KV_PAGE_TEST or TENSORFOLD_CUDA_KERNELS, or without --kv-cache fp8",
+        error.Fp8KvDisk => "--kv-cache fp8 keeps Flash Next's states in device memory only: serve it without --learn-conversations or --spill-gib's disk tier, or without --kv-cache fp8",
+        error.Fp8KvPaged => "a stream on pages keeps bf16 caches: unset TF_FLASHNEXT_KV_PAGES and TF_FLASHNEXT_KV_PAGE_TEST with --kv-cache fp8",
         error.TrainingOnCapturedGlue => "--slide trains on Flash Next's own glue: serve it without TENSORFOLD_CUDA_KERNELS",
     };
 }
