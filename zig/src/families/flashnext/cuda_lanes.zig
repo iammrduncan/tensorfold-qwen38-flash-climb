@@ -144,6 +144,8 @@ pub fn Namespace(comptime Tri: type) type {
             /// Its sequence's and draft's fixed-size buffers' blocks (Parts), given back when it drops.
             part_seq: ?cuda.DeviceBuffer = null,
             part_draft: ?cuda.DeviceBuffer = null,
+            /// The first token, drawn from the prompt's last row: the token of its logprob row.
+            first: ?u32 = null,
         };
 
         const Parts = @import("cuda_lane_parts.zig").Parts;
@@ -220,6 +222,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .probabilities = probabilitiesFn,
                     .score = @import("cuda_score.zig").Hook(Cuda, Tri).call,
                     .first_masked = firstMaskedFn,
+                    .first_row = firstRowFn,
                 };
                 const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
                 return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
@@ -278,6 +281,8 @@ pub fn Namespace(comptime Tri: type) type {
             fn open(self: *Cuda, s: *lanes.Stream) !*Lane {
                 const ids = s.prompt();
                 if (ids.len == 0 or ids.len + s.max_new > self.context) return error.PromptTooLong;
+                // logprobs: the first token's row alone (firstRowFn); a window's rows are not read back
+                if (s.logprobs != null and s.max_new > 1) return error.LogprobsAfterFirstToken;
                 const gop = try self.lanes.getOrPut(self.gpa, s);
                 if (gop.found_existing) dropLane(self, gop.value_ptr);
                 const drafting = self.head != null and s.drafts;
@@ -433,7 +438,9 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             const l = try self.lane(s);
             if (l.filled != null or position != l.seq.fed) return error.PositionMismatch;
-            return self.take(try self.tokenAt(&l.seq, s, position, &.{}));
+            const token = try self.tokenAt(&l.seq, s, position, &.{});
+            l.first = token;
+            return self.take(token);
         }
 
         /// The first token drawn among `mask`'s allowed tokens (structured output), from the prompt's last row.
@@ -441,7 +448,17 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             const l = try self.lane(s);
             if (l.filled != null or position != l.seq.fed) return error.PositionMismatch;
-            return self.take(try self.tokenAt(&l.seq, s, position, mask));
+            const token = try self.tokenAt(&l.seq, s, position, mask);
+            l.first = token;
+            return self.take(token);
+        }
+
+        /// The first token's logprob row: the prompt's last row of scores, the one it was drawn from, unmasked.
+        fn firstRowFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!lanes.LogprobRow {
+            const self = of(ptr);
+            const l = try self.lane(s);
+            const token = l.first orelse return error.NoFirstRow;
+            return @import("cuda_logprob_row.zig").of(l.seq.logits[0 .. prompt.vocabulary * 2], token, s.logprobs orelse 0);
         }
 
         fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -583,6 +600,7 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snaps.restore, dropLane);
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
+            _ = @import("cuda_logprob_row.zig");
         }
 
         test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {
