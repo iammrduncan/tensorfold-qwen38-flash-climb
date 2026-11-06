@@ -1,5 +1,7 @@
 # Qwen3.8 Flash Next on one DGX Spark: a Thermite hill climb
 
+> **The climb now runs on TensorFold v1.2.3:** see the [`recipe-v1.2.3`](https://github.com/iammrduncan/tensorfold-qwen38-flash-climb/tree/recipe-v1.2.3) branch, the default, and follow it [live](https://live.usethermite.com/b534bceca269d914). This branch is the recipe as published, on TensorFold v1.1.4: the first starting point measured, kept as it was.
+
 ![Thermite × Mia AI Lab × TensorFold. A Thermite core runs the hill climb on three DGX Sparks: runners 1 and 2 run experiments with Qwen 3.8 Flash on TensorFold and Mia's single-Spark recipe, runner 3 judges every run. Goal 1: prefill speed. Goal 2: decode speed.](assets/mia-tensorfold-thermite.png)
 
 This repository is a fork of [TensorFold](https://github.com/ashhart/TensorFold) that carries [Mia AI Lab's recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold) for serving Qwen3.8 Flash Next on a single DGX Spark: the recipe TensorFold points to for this model. [Thermite](https://github.com/iammrduncan/thermite) hill-climbs it. AI agents propose changes to the engine's source, and a judge the agents can't change builds, measures and keeps or refuses each one. It is a collaboration of Thermite, Mia AI Lab and TensorFold, and what it finds goes back to the recipe and to TensorFold.
@@ -33,9 +35,10 @@ All without changing what the model says.
 
 | Branch | What it holds |
 | --- | --- |
-| `qwen38-flash-climb` (default) | TensorFold v1.1.4, then the recipe's 17 patches, one commit each, as its `prepare.sh` applies them, then this README and the notices |
+| `qwen38-flash-climb` | TensorFold v1.1.4, then the recipe's 17 patches, one commit each, as its `prepare.sh` applies them, then this README and the notices |
 | `stock-v1.2.3` | TensorFold v1.2.3 as released: the second starting point |
 | `quality-hook` | The first token's logprob row on Flash Next's CUDA engine, for the judge's quality check |
+| `recipe-v1.2.3` (default) | TensorFold v1.2.3 with the recipe brought to it: where the climb runs |
 | `main` | TensorFold's own |
 
 ## Results
