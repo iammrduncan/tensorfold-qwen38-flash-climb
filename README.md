@@ -1,3 +1,51 @@
+# Qwen3.8 Flash Next on one DGX Spark: a Thermite hill climb
+
+![Thermite × Mia AI Lab × TensorFold. A Thermite core runs the hill climb on three DGX Sparks: runners 1 and 2 run experiments with Qwen 3.8 Flash on TensorFold and Mia's single-Spark recipe, runner 3 judges every run. Goal 1: prefill speed. Goal 2: decode speed.](assets/mia-tensorfold-thermite.png)
+
+This repository is a fork of [TensorFold](https://github.com/ashhart/TensorFold) that carries [Mia AI Lab's recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold) for serving Qwen3.8 Flash Next on a single DGX Spark: the recipe TensorFold points to for this model. [Thermite](https://github.com/iammrduncan/thermite) hill-climbs it. AI agents propose changes to the engine's source, and a judge the agents can't change builds, measures and keeps or refuses each one. It is a collaboration of Thermite, Mia AI Lab and TensorFold, and what it finds goes back to the recipe and to TensorFold.
+
+## The goals
+
+1. **Prefill speed:** prompt processing, in tokens per second, cold, at 8k, 32k and 64k tokens.
+2. **Decode speed:** generation, in tokens per second, for one reply and for five at once. The second run starts from the first run's best.
+
+Both without changing what the model says.
+
+## How the climb runs
+
+- **One Thermite rig:** a core, which runs the hill climb, and three runners, each a DGX Spark. Runners 1 and 2 run the agents' experiments. Runner 3 is the judge's alone and measures every change.
+- **Two starting points, measured first:** the recipe as published, on TensorFold v1.1.4, and stock TensorFold v1.2.3. The judge measures each one's load time, prefill and decode, and its run-to-run noise. The climb starts from one of them.
+- **What agents change:** the engine's source (`zig/src/`, `zig/kernels/`). The judge builds each change with the recipe's toolchain, serves it with the recipe's settings and times it with its own client.
+- **Quality:** every reply to the judge's fixed prompts, greedy, must be the starting point's, token for token. A reply with drafts off must equal its drafted twin, the recipe's own rule. From the first run on, the model's next-token distribution is also checked at many points of a long text: KL divergence, top-1 agreement and perplexity. A change that alters any reply is never kept on its own: it waits for a person's decision, with these numbers.
+- **Held back:** the judge's prompts and texts are not in this repository, so no change can be tuned to them.
+
+## Where the results go
+
+- **To Mia's recipe**, as a pull request: each kept change as a new patch after the recipe's 17, with what the judge measured. Before it is opened, the recipe's own tools check the patches: its `prepare.sh` builds from them, its `tools/exact.py` checks the replies, and its benchmark measures them. If the climb starts from v1.2.3, the pull request also brings the recipe forward to it.
+- **To TensorFold**, as pull requests by its contribution process: the changes that help the engine beyond this recipe, such as the first token's logprobs on Flash Next's CUDA engine, which the judge's quality check uses.
+- **Here:** each run's results, once the campaign is done.
+
+## Branches
+
+| Branch | What it holds |
+| --- | --- |
+| `qwen38-flash-climb` (default) | TensorFold v1.1.4, then the recipe's 17 patches, one commit each, as its `prepare.sh` applies them, then this README and the notices |
+| `stock-v1.2.3` | TensorFold v1.2.3 as released: the second starting point |
+| `quality-hook` | The first token's logprob row on Flash Next's CUDA engine, for the judge's quality check |
+| `main` | TensorFold's own |
+
+## Results
+
+The campaign is running. When it ends, its results land here: each kept change with its measured gain, and the patches as they go to the recipe.
+
+## Licences
+
+TensorFold is under its own licences (`LICENSE`, `NOTICE`, `LICENSES/`). The recipe's patches are Mia AI Lab's, under the MIT License (`LICENSES/MiaAI-Lab-MIT.txt`, `NOTICE-recipe`). [MODIFICATIONS.md](MODIFICATIONS.md) lists every file this fork changes.
+
+---
+
+*TensorFold's own README follows.*
+
 # TensorFold
 
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.

@@ -79,6 +79,13 @@ The 17 patches of MiaAI-Lab's recipe [Qwen3.8-Flash-Next-Single-DGX-Spark-Tensor
 - `zig/tests/cuda/nvfp4_experts_tile_tests.zig`
 - `zig/tests/cuda/w4a8_tests.zig`
 
+## This fork's README
+
+A section on top of TensorFold's README says what this fork is, how the hill climb runs and where its results go, with the collaboration's image (new). The files:
+
+- `README.md`
+- `assets/mia-tensorfold-thermite.png` (new)
+
 ## The hill climb's changes
 
 Each later commit is a change found by a hill climb run with [Thermite](https://github.com/iammrduncan/thermite) on DGX Sparks, confirmed by its judge, and states in its message what it changes and what it measured. Each is a patch on top of the recipe's, in its form: `git diff` from the commit before it.
