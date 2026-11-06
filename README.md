@@ -6,22 +6,26 @@ This repository is a fork of [TensorFold](https://github.com/ashhart/TensorFold)
 
 ## The goals
 
-1. **Prefill speed:** prompt processing, in tokens per second, cold, at 8k, 32k and 64k tokens.
-2. **Decode speed:** generation, in tokens per second, for one reply and for five at once. The second run starts from the first run's best.
+Four runs, each starting from the one before's best:
 
-Both without changing what the model says.
+1. **Prefill speed:** prompt processing, in tokens per second, cold, at 8k, 32k and 64k tokens.
+2. **Load time:** from the server's start to its first answer, with the model read cold from the Spark's own NVMe drive into GPU memory.
+3. **Decode speed:** generation, in tokens per second, for one reply and for five at once.
+4. **The recipe's settings:** the engine's `TF_FLASHNEXT_*` settings, tuned for the engine as the first three runs leave it.
+
+All without changing what the model says.
 
 ## How the climb runs
 
 - **One Thermite rig:** a core, which runs the hill climb, and three runners, each a DGX Spark. Runners 1 and 2 run the agents' experiments. Runner 3 is the judge's alone and measures every change.
 - **Two starting points, measured first:** the recipe as published, on TensorFold v1.1.4, and stock TensorFold v1.2.3. The judge measures each one's load time, prefill and decode, and its run-to-run noise. The climb starts from one of them.
-- **What agents change:** the engine's source (`zig/src/`, `zig/kernels/`). The judge builds each change with the recipe's toolchain, serves it with the recipe's settings and times it with its own client.
+- **What agents change:** the engine's source (`zig/src/`, `zig/kernels/`) in the first three runs, and the recipe's `TF_FLASHNEXT_*` settings in the fourth. The serve flags, such as the context window, the number of requests at once and the KV cache's format, never change. The judge builds each change with the recipe's toolchain, serves it with the recipe's settings and times it with its own client.
 - **Quality:** every reply to the judge's fixed prompts, greedy, must be the starting point's, token for token. A reply with drafts off must equal its drafted twin, the recipe's own rule. From the first run on, the model's next-token distribution is also checked at many points of a long text: KL divergence, top-1 agreement and perplexity. A change that alters any reply is never kept on its own: it waits for a person's decision, with these numbers.
 - **Held back:** the judge's prompts and texts are not in this repository, so no change can be tuned to them.
 
 ## Where the results go
 
-- **To Mia's recipe**, as a pull request: each kept change as a new patch after the recipe's 17, with what the judge measured. Before it is opened, the recipe's own tools check the patches: its `prepare.sh` builds from them, its `tools/exact.py` checks the replies, and its benchmark measures them. If the climb starts from v1.2.3, the pull request also brings the recipe forward to it.
+- **To Mia's recipe**, as a pull request: each kept change as a new patch after the recipe's 17, with what the judge measured, and the fourth run's settings in its `scripts/config.sh`. Before it is opened, the recipe's own tools check the patches: its `prepare.sh` builds from them, its `tools/exact.py` checks the replies, and its benchmark measures them. If the climb starts from v1.2.3, the pull request also brings the recipe forward to it.
 - **To TensorFold**, as pull requests by its contribution process: the changes that help the engine beyond this recipe, such as the first token's logprobs on Flash Next's CUDA engine, which the judge's quality check uses.
 - **Here:** each run's results, once the campaign is done.
 
