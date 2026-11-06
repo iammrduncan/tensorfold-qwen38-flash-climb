@@ -50,6 +50,7 @@ The other 14 patches, as written for v1.1.4, are in [`recipe/v1.1.4-patches/`](r
 | `recipe-v1.2.3` (default) | TensorFold v1.2.3, the recipe's patches `0001` to `0003` brought to it, the logprob hooks, the other 14 patches in `recipe/v1.1.4-patches/`, this README and the notices: the climb's starting point |
 | `qwen38-flash-climb` | TensorFold v1.1.4, then the recipe's 17 patches, one commit each, as its `prepare.sh` applies them: the recipe as published, measured as the first starting point |
 | `stock-v1.2.3` | TensorFold v1.2.3 as released, measured as the second |
+| `qwen38-flash-climb-v1.2.3` | `stock-v1.2.3` with the climb's notices: the commit the second starting point was measured from |
 | `quality-hook`, `quality-hook-v1.2.3` | The first token's logprob row on Flash Next's CUDA engine, on each of those |
 | `main` | TensorFold's own |
 
